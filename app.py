@@ -1,11 +1,9 @@
-import asyncio
-from aiohttp import web
+from flask import Flask, jsonify, request, g
 import strawberry
-from strawberry.aiohttp.views import GraphQLView
+from strawberry.flask.views import GraphQLView
 from typing import List
 from databases import Database
-from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, Date, Time
-from typing import List
+from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, Date
 
 DATABASE_URL = "sqlite:///./test.db"
 database = Database(DATABASE_URL)
@@ -28,8 +26,6 @@ attendances = Table(
     Column("date", Date),
 )
 
-
-
 # Create the database
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
@@ -47,38 +43,37 @@ class Attendance:
     member_id: int
     date: str
 
-
 SECRET_KEY = "your_secret_key"
 
 @strawberry.type
 class Query:
     @strawberry.field
-    async def members(self) -> List[Member]:
+    def members(self) -> List[Member]:
         query = members.select()
-        result = await database.fetch_all(query)
+        result = database.fetch_all(query)
         return [Member(**dict(row)) for row in result]
 
     @strawberry.field
-    async def attendances(self) -> List[Attendance]:
+    def attendances(self) -> List[Attendance]:
         query = attendances.select()
-        result = await database.fetch_all(query)
+        result = database.fetch_all(query)
         return [Attendance(**dict(row)) for row in result]
 
 @strawberry.type
 class Mutation:
     @strawberry.mutation
-    async def add_member(self, name: str, MAC: str) -> Member:
+    def add_member(self, name: str, MAC: str) -> Member:
         query = members.insert().values(name=name, MAC=MAC)
-        last_record_id = await database.execute(query)
+        last_record_id = database.execute(query)
         return Member(id=last_record_id, name=name, MAC=MAC)
 
     @strawberry.mutation
-    async def mark_attendance(self, mac_list: List[str], secret_key: str, date: str) -> Attendance:
+    def mark_attendance(self, mac_list: List[str], secret_key: str, date: str) -> Attendance:
         if secret_key != SECRET_KEY:
             raise Exception("Invalid secret key")
 
         query = members.select().where(members.c.MAC.in_(mac_list))
-        results = await database.fetch_all(query)
+        results = database.fetch_all(query)
         member_ids = [row["id"] for row in results]
 
         if not member_ids:
@@ -86,33 +81,38 @@ class Mutation:
 
         # Insert attendance logs
         query = attendances.insert().values(member_id=member_ids[0], date=date)
-        last_record_id = await database.execute(query)
+        last_record_id = database.execute(query)
         
         return Attendance(id=last_record_id, member_id=member_ids[0], date=date)
-
 
 # Create the schema
 schema = strawberry.Schema(Query, Mutation)
 
-# Create the aiohttp app
-app = web.Application()
-app.router.add_route("*", "/graphql", GraphQLView(schema=schema))
+# Create the Flask app
+app = Flask(__name__)
 
-async def on_startup(app):
-    await database.connect()
-
-async def on_cleanup(app):
-    await database.disconnect()
-
-app.on_startup.append(on_startup)
-app.on_cleanup.append(on_cleanup)
+# Add the GraphQL endpoint
+app.add_url_rule(
+    "/graphql",
+    view_func=GraphQLView.as_view("graphql_view", schema=schema)
+)
 
 # Add a simple route
-async def hello(request):
-    return web.Response(text="My Second API !!")
+@app.route("/")
+def hello():
+    return "My Flask API !!"
 
-app.router.add_get("/", hello)
+# Startup and cleanup database connections
+@app.before_request
+def connect_db():
+    if not hasattr(g, 'db'):
+        database.connect()
+
+@app.teardown_appcontext
+def disconnect_db(exception=None):
+    if hasattr(g, 'db'):
+        database.disconnect()
 
 # Run the app
 if __name__ == "__main__":
-    web.run_app(app, port=8000)
+    app.run()
